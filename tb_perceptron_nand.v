@@ -5,72 +5,88 @@ module tb_perceptron_nand;
     reg               clk;
     reg               rst;
     reg               valid_in;
-    reg  signed [7:0] x0, x1;
-    wire              y;
+    reg  signed [7:0] x1, x2;
+    wire              y_out;
     wire              valid_out;
 
     perceptron_nand uut (
-        .clk(clk), .rst(rst), .valid_in(valid_in),
-        .x0(x0), .x1(x1), .y(y), .valid_out(valid_out)
+        .clk       (clk),
+        .rst       (rst),
+        .valid_in  (valid_in),
+        .x1        (x1),
+        .x2        (x2),
+        .y_out     (y_out),
+        .valid_out (valid_out)
     );
 
-    // Clock: 50MHz
+    // 50 MHz clock
     initial clk = 0;
     always #10 clk = ~clk;
 
-    // Q4.4 encoding: 1.0 = 16, 0.0 = 0
-    localparam signed [7:0] ONE  = 8'sd16;  // 1.0 in Q4.4
-    localparam signed [7:0] ZERO = 8'sd0;   // 0.0 in Q4.4
+    // Q4.4 constants  (matches Python: +1.0 and -1.0)
+    localparam signed [7:0] POS_ONE =  8'sd16;   // +1.0
+    localparam signed [7:0] NEG_ONE = -8'sd16;   // -1.0
 
-    integer pass_count;
-    integer test_count;
+    integer pass_count, test_count;
 
-    task test_nand;
-        input signed [7:0] in0, in1;
-        input expected;
+    // -------------------------------------------------------
+    // Task: feed one test vector, wait for pipeline, check
+    // -------------------------------------------------------
+    task test_perceptron;
+        input signed  [7:0] in1, in2;
+        input                expected;   // 1 = +1,  0 = -1
         begin
             @(posedge clk);
-            x0 = in0; x1 = in1; valid_in = 1;
+            x1 = in1;  x2 = in2;  valid_in = 1;
             @(posedge clk);
             valid_in = 0;
-            @(posedge clk); // wait for pipeline
-            @(posedge clk);
+            @(posedge clk);          // pipeline stage 1
+            @(posedge clk);          // pipeline stage 2
             test_count = test_count + 1;
-            if (y == expected) begin
-                $display("PASS: NAND(%0d,%0d) = %0d (expected %0d)",
-                         in0/16, in1/16, y, expected);
+            if (y_out == expected) begin
+                $display("PASS: f(%2d, %2d) = %0d  (expected %0d)",
+                         in1 / 16, in2 / 16, y_out, expected);
                 pass_count = pass_count + 1;
             end else begin
-                $display("FAIL: NAND(%0d,%0d) = %0d (expected %0d)",
-                         in0/16, in1/16, y, expected);
+                $display("FAIL: f(%2d, %2d) = %0d  (expected %0d)",
+                         in1 / 16, in2 / 16, y_out, expected);
             end
         end
     endtask
 
+    // -------------------------------------------------------
+    // Main stimulus
+    // -------------------------------------------------------
     initial begin
-        $display("============================================");
-        $display("Phase 1: Single Perceptron NAND Gate Test");
-        $display("============================================");
-        rst = 1; valid_in = 0; x0 = 0; x1 = 0;
-        pass_count = 0; test_count = 0;
-        repeat(5) @(posedge clk);
+        $display("================================================");
+        $display(" Perceptron NAND Test  (bipolar -1 / +1)");
+        $display(" Trained weights: w0~0.40  w1~-0.40  w2~-0.15");
+        $display("================================================");
+
+        rst = 1;  valid_in = 0;  x1 = 0;  x2 = 0;
+        pass_count = 0;  test_count = 0;
+        repeat (5) @(posedge clk);
         rst = 0;
-        repeat(2) @(posedge clk);
+        repeat (2) @(posedge clk);
 
-        // Test all 4 input combinations
-        test_nand(ZERO, ZERO, 1);   // NAND(0,0) = 1
-        test_nand(ZERO, ONE,  1);   // NAND(0,1) = 1
-        test_nand(ONE,  ZERO, 1);   // NAND(1,0) = 1
-        test_nand(ONE,  ONE,  0);   // NAND(1,1) = 0
+        // Python notebook truth table:
+        //   x1=-1, x2=-1  →  y = +1   (LED = 1)
+        //   x1=-1, x2=+1  →  y = +1   (LED = 1)
+        //   x1=+1, x2=-1  →  y = +1   (LED = 1)
+        //   x1=+1, x2=+1  →  y = -1   (LED = 0)
+        test_perceptron(NEG_ONE, NEG_ONE, 1);
+        test_perceptron(NEG_ONE, POS_ONE, 1);
+        test_perceptron(POS_ONE, NEG_ONE, 1);
+        test_perceptron(POS_ONE, POS_ONE, 0);
 
-        repeat(5) @(posedge clk);
-        $display("============================================");
-        $display("Results: %0d/%0d passed", pass_count, test_count);
-        $display("============================================");
+        repeat (5) @(posedge clk);
+        $display("================================================");
+        $display(" Results: %0d / %0d passed", pass_count, test_count);
+        $display("================================================");
         $finish;
     end
 
-    // For VCS+Verdi waveform dump
+    // VCS + Verdi waveform dump
     initial begin
         $fsdbDumpfile("wave.fsdb");
         $fsdbDumpvars(0, tb_perceptron_nand);
