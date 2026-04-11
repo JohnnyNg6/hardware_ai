@@ -1,7 +1,6 @@
 `timescale 1ns / 1ps
 //============================================================================
 // MNIST Neural Network — Board I/O Wrapper
-// Board: 博宸精芯 Kintex7-Base  (XC7K325T-2FFG676)
 //
 //   KEY1 → next test image  (cycles 0 → 1 → … → 9 → 0)
 //   KEY2 → previous test image
