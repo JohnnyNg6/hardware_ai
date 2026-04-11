@@ -2,7 +2,7 @@
 //============================================================================
 // MNIST Neural Network Inference Core  (sequential, 784→25→10)
 //
-// Architecture (from 3-2-mnist_learning_conf5.ipynb):
+// Architecture:
 //   Flatten:  28×28 → 784
 //   Hidden:   Dense(25, ReLU)      — 784×25 weights + 25 biases = 19,625
 //   Output:   Dense(10, softmax)   — 25×10  weights + 10 biases =    260
