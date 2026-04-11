@@ -3,7 +3,6 @@
 // ============================================================
 // Phase 1: Single Perceptron - NAND Gate (Inference)
 //
-// Matches Python notebook (1-1-perceptron_learning.ipynb):
 //   Encoding : bipolar, x ∈ {-1, +1}
 //   Bias     : x0 = 1.0 (hardwired, not an external input)
 //   Activation: sign function  z < 0 → -1,  z >= 0 → +1
