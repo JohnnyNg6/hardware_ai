@@ -1,67 +1,89 @@
 `timescale 1ns / 1ps
 
 // ============================================================
-// Phase 1: Single Perceptron implementing NAND gate
-// Fixed-point: Q4.4 format (4 integer bits, 4 fractional bits = 8-bit)
-// This teaches: fixed-point MAC, step activation
+// Phase 1: Single Perceptron - NAND Gate (Inference)
+//
+// Matches Python notebook (1-1-perceptron_learning.ipynb):
+//   Encoding : bipolar, x ∈ {-1, +1}
+//   Bias     : x0 = 1.0 (hardwired, not an external input)
+//   Activation: sign function  z < 0 → -1,  z >= 0 → +1
+//   Trained weights: w0 = 0.40,  w1 = -0.40,  w2 = -0.15
+//
+// Fixed-point format: Q4.4 (8-bit signed)
+//   Range      : -8.0 to +7.9375
+//   Resolution : 1/16 = 0.0625
+//   Encoding   : real_value = raw_integer / 16
 // ============================================================
 module perceptron_nand (
-    input               clk,
-    input               rst,
-    input               valid_in,   // input valid pulse
-    input  signed [7:0] x0,         // input 0, Q4.4
-    input  signed [7:0] x1,         // input 1, Q4.4
-    output reg          y,          // output (0 or 1)
-    output reg          valid_out   // output valid pulse
+    input                clk,
+    input                rst,
+    input                valid_in,
+    input  signed  [7:0] x1,         // input 1,  Q4.4  (-1.0 or +1.0)
+    input  signed  [7:0] x2,         // input 2,  Q4.4  (-1.0 or +1.0)
+    output reg           y_out,      // 1 = perceptron says +1,  0 = says -1
+    output reg           valid_out
 );
 
-    // --------------------------------------------------------
-    // Weights and bias in Q4.4 format
-    // Q4.4: value = integer_representation / 16
-    // So -2.0 = -32 in Q4.4, 3.0 = 48 in Q4.4
-    // --------------------------------------------------------
-    localparam signed [7:0] W0 = -8'sd32;   // -2.0 in Q4.4
-    localparam signed [7:0] W1 = -8'sd32;   // -2.0 in Q4.4
-    localparam signed [7:0] BIAS = 8'sd48;  //  3.0 in Q4.4
+    // ---------------------------------------------------------
+    // Bias input x0 = 1.0  (always 1; part of perceptron model)
+    // ---------------------------------------------------------
+    localparam signed [7:0] X0_BIAS = 8'sd16;   // 1.0 in Q4.4
 
-    // --------------------------------------------------------
-    // Pipeline stage 1: Multiply (Q4.4 * Q4.4 = Q8.8, 16-bit)
-    // --------------------------------------------------------
-    reg signed [15:0] mul0, mul1;
-    reg signed [7:0]  bias_r;
-    reg               valid_p1;
+    // ---------------------------------------------------------
+    // Trained weights (from Python notebook final epoch)
+    //
+    //   Python         Q4.4 raw     Actual Q4.4 value
+    //   w0 =  0.40  →   6          →  0.375
+    //   w1 = -0.40  →  -6          → -0.375
+    //   w2 = -0.15  →  -2          → -0.125
+    //
+    // Small quantization error, but all 4 outputs still correct.
+    // ---------------------------------------------------------
+    localparam signed [7:0] W0 =  8'sd6;    // bias weight  ≈  0.40
+    localparam signed [7:0] W1 = -8'sd6;    // weight 1     ≈ -0.40
+    localparam signed [7:0] W2 = -8'sd2;    // weight 2     ≈ -0.15
+
+    // ---------------------------------------------------------
+    // Pipeline Stage 1: Multiply   (Q4.4 × Q4.4 = Q8.8, 16-bit)
+    //   mul0 = w0 * x0   (bias term, x0 hardwired to 1.0)
+    //   mul1 = w1 * x1
+    //   mul2 = w2 * x2
+    // ---------------------------------------------------------
+    reg signed [15:0] mul0, mul1, mul2;
+    reg               pipe1_valid;
 
     always @(posedge clk) begin
         if (rst) begin
-            mul0    <= 0;
-            mul1    <= 0;
-            bias_r  <= 0;
-            valid_p1 <= 0;
+            mul0        <= 16'sd0;
+            mul1        <= 16'sd0;
+            mul2        <= 16'sd0;
+            pipe1_valid <= 1'b0;
         end else begin
-            mul0    <= x0 * W0;     // Q8.8 result
-            mul1    <= x1 * W1;     // Q8.8 result
-            bias_r  <= BIAS;
-            valid_p1 <= valid_in;
+            mul0        <= X0_BIAS * W0;       // w0 * 1.0
+            mul1        <= x1      * W1;       // w1 * x1
+            mul2        <= x2      * W2;       // w2 * x2
+            pipe1_valid <= valid_in;
         end
     end
 
-    // --------------------------------------------------------
-    // Pipeline stage 2: Accumulate + Activation
-    // Need to align bias to Q8.8: shift left by 4
-    // --------------------------------------------------------
-    reg signed [17:0] sum;  // extra bits to prevent overflow
+    // ---------------------------------------------------------
+    // Pipeline Stage 2: Accumulate  +  Sign Activation
+    //
+    //   z = mul0 + mul1 + mul2
+    //
+    //   Python:  if z < 0: return -1   else: return 1
+    //   Verilog: y_out = (z >= 0) ? 1 : 0
+    //            (we map +1→LED ON,  -1→LED OFF)
+    // ---------------------------------------------------------
+    wire signed [17:0] z_sum = mul0 + mul1 + mul2;
 
     always @(posedge clk) begin
         if (rst) begin
-            sum       <= 0;
-            y         <= 0;
-            valid_out <= 0;
+            y_out     <= 1'b0;
+            valid_out <= 1'b0;
         end else begin
-            // bias_r is Q4.4, shift left 4 to make Q8.8
-            sum       <= mul0 + mul1 + (bias_r <<< 4);
-            // Step activation: if sum > 0, output 1
-            y         <= (mul0 + mul1 + (bias_r <<< 4)) > 0 ? 1'b1 : 1'b0;
-            valid_out <= valid_p1;
+            y_out     <= (z_sum >= 18'sd0) ? 1'b1 : 1'b0;
+            valid_out <= pipe1_valid;
         end
     end
 
