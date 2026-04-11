@@ -1,7 +1,6 @@
 `timescale 1ns / 1ps
 //============================================================================
 // XOR Neural Network — Board I/O Wrapper
-// Board: 博宸精芯 Kintex7-Base  (XC7K325T-2FFG676)
 //
 //   KEY1 → x1  (pressed = +1, released = -1)
 //   KEY2 → x2  (pressed = +1, released = -1)
