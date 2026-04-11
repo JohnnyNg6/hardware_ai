@@ -1,75 +1,85 @@
 `timescale 1ns / 1ps
 
-// Wraps perceptron_nand for FPGA board test
-// KEY1/KEY2 = x0/x1 inputs (press = 1, release = 0)
-// LED1 = perceptron output (NAND result)
-// LED2 = x0 value, LED3 = x1 value
-// LED8 = heartbeat (proves FPGA is running)
+// ============================================================
+// FPGA board wrapper for perceptron NAND gate
+//
+//   KEY1 / KEY2  =  x1 / x2
+//     not pressed  →  -1   (bipolar encoding from notebook)
+//     pressed      →  +1
+//
+//   LED1 = NAND result   (ON = +1,  OFF = -1)
+//   LED2 = x1 state      (ON = pressed = +1)
+//   LED3 = x2 state      (ON = pressed = +1)
+//   LED8 = heartbeat     (proves FPGA is alive)
+// ============================================================
 module led_perceptron (
-    input           sys_clk,
-    input   [4:0]   key,        // active low
-    output  [7:0]   led
+    input        sys_clk,       // 50 MHz,  G22
+    input  [4:0] key,           // active-low buttons
+    output [7:0] led            // active-high LEDs
 );
 
-    // ------------------------------------------------
-    // Heartbeat blink on LED8
-    // ------------------------------------------------
+    // ---------------------------------------------------------
+    // Heartbeat on LED8  (~2 Hz blink)
+    // ---------------------------------------------------------
     reg [24:0] hb_cnt;
     reg        heartbeat;
+
     always @(posedge sys_clk) begin
         if (hb_cnt == 25'd24_999_999) begin
-            hb_cnt    <= 0;
+            hb_cnt    <= 25'd0;
             heartbeat <= ~heartbeat;
-        end else
-            hb_cnt <= hb_cnt + 1;
+        end else begin
+            hb_cnt <= hb_cnt + 25'd1;
+        end
     end
 
-    // ------------------------------------------------
-    // Key debounce/sync
-    // ------------------------------------------------
+    // ---------------------------------------------------------
+    // Button synchroniser  (2-FF metastability guard)
+    // ---------------------------------------------------------
     reg [4:0] key_r0, key_r1;
+
     always @(posedge sys_clk) begin
         key_r0 <= key;
         key_r1 <= key_r0;
     end
-    // key active low: pressed = 0, so invert
+
+    // Keys are active-low: pressed → 0, released → 1
     wire [4:0] key_pressed = ~key_r1;
 
-    // ------------------------------------------------
-    // Convert key press to Q4.4 fixed-point
-    // ------------------------------------------------
-    wire signed [7:0] x0_val = key_pressed[0] ? 8'sd16 : 8'sd0; // KEY1
-    wire signed [7:0] x1_val = key_pressed[1] ? 8'sd16 : 8'sd0; // KEY2
+    // ---------------------------------------------------------
+    // Map button state to bipolar Q4.4 values
+    //   pressed   →  +1.0  =  +16   in Q4.4
+    //   released  →  -1.0  =  -16   in Q4.4
+    //
+    // This matches the Python notebook encoding:
+    //   x_train uses -1 and +1
+    // ---------------------------------------------------------
+    wire signed [7:0] x1_val = key_pressed[0] ?  8'sd16 : -8'sd16;  // KEY1
+    wire signed [7:0] x2_val = key_pressed[1] ?  8'sd16 : -8'sd16;  // KEY2
 
-    // ------------------------------------------------
-    // Perceptron instance
-    // ------------------------------------------------
-    wire nand_out;
+    // ---------------------------------------------------------
+    // Perceptron instance  (always computing, valid_in tied high)
+    // ---------------------------------------------------------
+    wire nand_result;
     wire nand_valid;
 
-    // Continuous valid (always computing)
     perceptron_nand u_nand (
-        .clk(sys_clk),
-        .rst(1'b0),
-        .valid_in(1'b1),
-        .x0(x0_val),
-        .x1(x1_val),
-        .y(nand_out),
-        .valid_out(nand_valid)
+        .clk       (sys_clk),
+        .rst       (1'b0),
+        .valid_in  (1'b1),
+        .x1        (x1_val),
+        .x2        (x2_val),
+        .y_out     (nand_result),
+        .valid_out (nand_valid)
     );
 
-    // ------------------------------------------------
-    // LED output
-    // ------------------------------------------------
-    // LED1 = NAND result
-    // LED2 = x0 input (KEY1 state)
-    // LED3 = x1 input (KEY2 state)
-    // LED4-7 = off
-    // LED8 = heartbeat
-    assign led[0] = nand_out;          // NAND result
-    assign led[1] = key_pressed[0];    // x0
-    assign led[2] = key_pressed[1];    // x1
-    assign led[6:3] = 4'b0000;
-    assign led[7] = heartbeat;         // alive indicator
+    // ---------------------------------------------------------
+    // LED assignment
+    // ---------------------------------------------------------
+    assign led[0]   = nand_result;       // NAND output
+    assign led[1]   = key_pressed[0];    // x1 indicator
+    assign led[2]   = key_pressed[1];    // x2 indicator
+    assign led[6:3] = 4'b0000;          // unused
+    assign led[7]   = heartbeat;         // alive blink
 
 endmodule
