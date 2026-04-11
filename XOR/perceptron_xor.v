@@ -2,7 +2,7 @@
 //============================================================================
 // XOR Neural Network Inference Core  (combinational, no I/O)
 //
-// Architecture (from Ch02-learning_xor.ipynb):
+// Architecture:
 //   Hidden: h0 = tanh(W00 + W01·x1 + W02·x2)
 //           h1 = tanh(W10 + W11·x1 + W12·x2)
 //   Output: y  = sigmoid(W20 + W21·h0 + W22·h1)
