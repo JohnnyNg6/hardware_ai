@@ -13,7 +13,6 @@ module neuron #(
     input  wire                relu_en
 );
 
-    // Weight ROM — distributed for async read (each neuron carries its own)
     (* ram_style = "distributed" *)
     reg signed [15:0] w [0:NUM_INPUTS];
     initial $readmemh(WEIGHT_FILE, w);
