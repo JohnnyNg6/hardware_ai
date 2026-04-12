@@ -19,7 +19,9 @@ module neuron #(
     localparam [1:0] S_IDLE = 2'd0, S_MAC = 2'd1, S_ACT = 2'd2;
     reg [1:0] state;
 
-    localparam CW = $clog2(NUM_INPUTS > 1 ? NUM_INPUTS : 2);
+    // FIX Bug 1: use NUM_INPUTS+1 so cnt+1 can reach NUM_INPUTS
+    //            without unsigned overflow ($clog2(128)=7 is too narrow)
+    localparam CW = $clog2(NUM_INPUTS > 0 ? NUM_INPUTS + 1 : 2);
     reg  [CW-1:0]     cnt;
     reg  signed [47:0] acc;
 
