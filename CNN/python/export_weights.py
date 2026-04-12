@@ -71,11 +71,25 @@ write_mem("conv2_w.mem", to_q88(conv2_w_t))
 write_mem("conv2_b.mem", to_q88(conv2_b))
 
 # ── 5. Export Dense ───────────────────────────────────────────────────────
-dense_w, dense_b = model.layers[3].get_weights()   # [3136,10], [10]
-# (layers[2] is Flatten, no weights)
-dense_w_t = np.transpose(dense_w, (1, 0))           # → [10,3136]
-write_mem("dense_w.mem", to_q88(dense_w_t))
-write_mem("dense_b.mem", to_q88(dense_b))
+#  Dense layer → per-neuron files for neuron.v
+#  Each file layout: w[0]=bias, w[1..NUM_INPUTS]=weights  (Q8.8 hex)
+# ------------------------------------------------------------------
+dense_w = model.get_layer('dense').get_weights()[0]   # shape (NUM_INPUTS, NUM_CLASSES)
+dense_b = model.get_layer('dense').get_weights()[1]   # shape (NUM_CLASSES,)
 
-print("\nAll .mem files written. Copy them to the Vivado project directory.")
-print(f"Normalization: mean={MEAN:.6f}  std={STDDEV:.6f}")
+num_classes = dense_b.shape[0]
+num_inputs  = dense_w.shape[0]
+
+for c in range(num_classes):
+    fname = f'dense_n{c}.mem'
+    with open(fname, 'w') as f:
+        # --- entry 0 : bias ---
+        bval = int(np.round(dense_b[c] * 256.0))
+        bval = int(np.clip(bval, -32768, 32767))
+        f.write(f'{bval & 0xFFFF:04x}\n')
+        # --- entries 1..NUM_INPUTS : weights ---
+        for i in range(num_inputs):
+            wval = int(np.round(dense_w[i, c] * 256.0))
+            wval = int(np.clip(wval, -32768, 32767))
+            f.write(f'{wval & 0xFFFF:04x}\n')
+    print(f'  wrote {fname}  ({num_inputs+1} entries)')
