@@ -88,7 +88,7 @@ module dense_layer #(
             S_FEED: begin
                 n_din       <= in_data;
                 n_din_valid <= 1'b1;
-                if (cnt == NI[CW-1:0]-1)
+                if (cnt == NI - 1)
                     st <= S_WAIT;
                 else begin
                     cnt     <= cnt + 1;
