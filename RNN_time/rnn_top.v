@@ -11,14 +11,14 @@ module rnn_top (
 localparam N_HIDDEN       = 128;
 localparam RNN_INPUTS     = 129;   // 1 input + 128 hidden
 localparam DENSE_INPUTS   = 128;
-localparam CLK_FREQ       = 50_000_000;  // CHANGED: for your UART
-localparam BAUD           = 115_200;     // CHANGED: for your UART
+localparam CLK_FREQ       = 50_000_000;
+localparam BAUD           = 115_200;
 localparam MAX_SEQ        = 1024;
 
 // ===== UART RX =====
 wire [7:0] rx_data;
 wire       rx_valid;
-uart_rx #(                               // CHANGED: your parameter style
+uart_rx #(
     .CLK_FREQ(CLK_FREQ),
     .BAUD(BAUD)
 ) u_rx (
@@ -31,29 +31,31 @@ uart_rx #(                               // CHANGED: your parameter style
 
 // ===== UART TX =====
 reg  [7:0] tx_data;
-reg        tx_send;                      // CHANGED: renamed from tx_start
-wire       tx_busy;                      // CHANGED: inverted sense vs ready
-wire       tx_ready = ~tx_busy;          // CHANGED: derive ready from busy
+reg        tx_send;
+wire       tx_busy;
+wire       tx_ready = ~tx_busy;
 
-uart_tx #(                               // CHANGED: your parameter style
+uart_tx #(
     .CLK_FREQ(CLK_FREQ),
     .BAUD(BAUD)
 ) u_tx (
     .clk(clk),
     .rst_n(rst_n),
     .data(tx_data),
-    .send(tx_send),                      // CHANGED: port name
+    .send(tx_send),
     .tx(uart_txd),
-    .busy(tx_busy)                       // CHANGED: port name
+    .busy(tx_busy)
 );
 
 // ===== input RAM =====
+// FIX Bug 3: force distributed RAM for combinational reads
+(* ram_style = "distributed" *)
 reg signed [15:0] input_ram [0:MAX_SEQ-1];
 reg [15:0] seq_len;
 reg [15:0] recv_cnt;
 reg [7:0]  byte_hi;
 
-// ===== hidden state (flat 128×16 = 2048 bits) =====
+// ===== hidden state (flat 128x16 = 2048 bits) =====
 reg  [N_HIDDEN*16-1:0] hidden_flat;
 
 // ===== RNN layer wires =====
@@ -94,6 +96,7 @@ neuron #(
 reg signed [15:0] result;
 
 // ===== FSM =====
+// FIX Bug 2: added S_WAIT_HI / S_WAIT_LO (16 states, still fits 4 bits)
 localparam [3:0]
     S_IDLE          = 4'd0,
     S_RECV_LEN_HI   = 4'd1,
@@ -107,17 +110,24 @@ localparam [3:0]
     S_DENSE_FEED    = 4'd9,
     S_DENSE_WAIT    = 4'd10,
     S_SEND_HI       = 4'd11,
-    S_SEND_LO       = 4'd12,
-    S_DONE          = 4'd13;
+    S_WAIT_HI       = 4'd12,   // NEW – one-cycle wait for tx_busy to register
+    S_SEND_LO       = 4'd13,
+    S_WAIT_LO       = 4'd14,   // NEW – one-cycle wait for tx_busy to register
+    S_DONE          = 4'd15;
 
 reg [3:0]  state;
 reg [15:0] timestep;
 reg [7:0]  feed_cnt;
 
-// hidden-state read muxes
-wire signed [15:0] h_rd = $signed(hidden_flat[feed_cnt*16 +: 16]);
-wire [7:0] h_idx = feed_cnt - 8'd1;
-wire signed [15:0] h_rd_rnn = $signed(hidden_flat[h_idx*16 +: 16]);
+// Hidden-state read mux for Dense layer (feed_cnt 0..127 → hidden[0..127])
+wire signed [15:0] h_rd = $signed(hidden_flat[feed_cnt[6:0] * 16 +: 16]);
+
+// Hidden-state read mux for RNN layer  (feed_cnt 1..128 → hidden[0..127])
+// Note: when feed_cnt=128, feed_cnt[6:0]=0, 0-1=127 in 7-bit unsigned – correct.
+// When feed_cnt=0 the result is don't-care (x-input is used instead) and
+// the index stays in-range (127), so no out-of-bounds access.
+wire [6:0]         rnn_h_idx = feed_cnt[6:0] - 7'd1;
+wire signed [15:0] h_rd_rnn  = $signed(hidden_flat[rnn_h_idx * 16 +: 16]);
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -133,7 +143,7 @@ always @(posedge clk or negedge rst_n) begin
         dense_start  <= 0;
         dense_din    <= 0;
         dense_din_valid <= 0;
-        tx_send      <= 0;            // CHANGED: was tx_start
+        tx_send      <= 0;
         tx_data      <= 0;
         result       <= 0;
         byte_hi      <= 0;
@@ -144,7 +154,7 @@ always @(posedge clk or negedge rst_n) begin
         rnn_din_valid   <= 1'b0;
         dense_start     <= 1'b0;
         dense_din_valid <= 1'b0;
-        tx_send         <= 1'b0;      // CHANGED: was tx_start
+        tx_send         <= 1'b0;
 
         case (state)
         // -------- receive phase --------
@@ -241,24 +251,32 @@ always @(posedge clk or negedge rst_n) begin
             end
 
         // -------- send result via UART --------
+        // FIX Bug 2: after each tx_send pulse, wait one cycle so
+        //            tx_busy registers before we check tx_ready again.
         S_SEND_HI: begin
             led <= 4'b1000;
-            if (tx_ready) begin                // tx_ready = ~tx_busy
+            if (tx_ready) begin
                 tx_data <= result[15:8];
-                tx_send <= 1'b1;               // CHANGED: was tx_start
-                state   <= S_SEND_LO;
+                tx_send <= 1'b1;
+                state   <= S_WAIT_HI;
             end
         end
 
+        S_WAIT_HI:                      // NEW: 1-cycle delay for tx_busy
+            state <= S_SEND_LO;         // next cycle tx_busy==1 → tx_ready==0
+
         S_SEND_LO:
-            if (tx_ready) begin
+            if (tx_ready) begin         // waits until 1st byte finishes
                 tx_data <= result[7:0];
-                tx_send <= 1'b1;               // CHANGED: was tx_start
-                state   <= S_DONE;
+                tx_send <= 1'b1;
+                state   <= S_WAIT_LO;
             end
 
+        S_WAIT_LO:                      // NEW: 1-cycle delay for tx_busy
+            state <= S_DONE;
+
         S_DONE:
-            if (tx_ready)
+            if (tx_ready)               // waits until 2nd byte finishes
                 state <= S_IDLE;
 
         default: state <= S_IDLE;
