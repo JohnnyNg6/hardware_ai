@@ -39,7 +39,7 @@ module lstm_top #(
 
     uart_tx #(.CLK_FREQ(50_000_000)) u_tx (
         .clk(clk),.rst_n(rst_n),.data(tx_data),
-        .start(tx_start),.tx(uart_txd),.busy(tx_busy));
+        .send(tx_start),.tx(uart_txd),.busy(tx_busy));
 
     // ── character map ROMs ──
     (* rom_style = "distributed" *)
