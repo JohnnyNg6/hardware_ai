@@ -32,14 +32,16 @@ TEMPLATE_NEURON = """\
 """
 
 TEMPLATE_BOT = """\
-    // ---- Write MUX ----
+    // ---- Write MUX (registered to align with out_addr / out_we) ----
     wire [7:0] wr_idx;
+    reg signed [15:0] out_data_mux;
     integer m;
     always @(*) begin
-        out_data = n_dout[0];
+        out_data_mux = n_dout[0];
         for (m = 0; m < NF; m = m + 1)
-            if (wr_idx == m[7:0]) out_data = n_dout[m];
+            if (wr_idx == m[7:0]) out_data_mux = n_dout[m];
     end
+    always @(posedge clk) out_data <= out_data_mux;
 
     // ---- Controller ----
     conv_neuron_layer #(
@@ -50,9 +52,9 @@ TEMPLATE_BOT = """\
         .in_addr(in_addr),.in_data(in_data),
         .out_addr(out_addr),.out_data(),.out_we(out_we),
         .n_start(n_start),.n_din(n_din),.n_din_valid(n_din_valid),
-        .n_dout_0(n_dout[0]),.n_done_0(n_done[0])
+        .n_dout_0(n_dout[0]),.n_done_0(n_done[0]),
+        .wr_idx(wr_idx)
     );
-    assign wr_idx = u_ctrl.wr_idx;
 endmodule
 """
 
@@ -68,13 +70,11 @@ def gen_conv_block(filename, mod_name, prefix, nf, ksz,
     print(f"Generated {filename}")
 
 if __name__ == '__main__':
-    # Conv1: 32×32×3 → 16×16×64, 5×5, stride 2, same (pad_top=1, pad_left=1)
     gen_conv_block("conv1_block.v", "conv1_block", "conv1_n",
                    nf=64, ksz=75,
                    ih=32, iw=32, ic=3, fh=5, fw=5,
                    st=2, pt=1, pl=1, oh=16, ow=16)
 
-    # Conv2: 16×16×64 → 8×8×64, 3×3, stride 2, same (pad_top=0, pad_left=0)
     gen_conv_block("conv2_block.v", "conv2_block", "conv2_n",
                    nf=64, ksz=576,
                    ih=16, iw=16, ic=64, fh=3, fw=3,
