@@ -31,39 +31,24 @@ model.fit(tr_img, tr_lbl, validation_data=(te_img, te_lbl),
 np.savez("cifar_norm.npz", mean=MEAN, std=STD)
 model.save("cifar_cnn_model.h5")
 
-# ── Helpers ──
-def to_q88(x):
-    return np.clip(np.round(x * 256.0), -32768, 32767).astype(np.int16)
-
 def write_neuron_mem(fname, bias_f, weights_f):
-    """Write per-neuron file: w[0]=bias, w[1..N]=weights."""
     with open(fname, 'w') as f:
         b = int(np.clip(np.round(bias_f * 256), -32768, 32767))
         f.write(f"{b & 0xFFFF:04x}\n")
         for v in weights_f.flatten():
             q = int(np.clip(np.round(v * 256), -32768, 32767))
             f.write(f"{q & 0xFFFF:04x}\n")
-    print(f"  {fname}: {1 + weights_f.size} entries")
 
-# ── Conv1: [5,5,3,64] → per-neuron files ──
-w1, b1 = model.layers[0].get_weights()       # w1: (5,5,3,64), b1: (64,)
-# Each neuron f gets: bias=b1[f], weights=w1[:,:,:,f] flattened (kh,kw,kc)
+w1, b1 = model.layers[0].get_weights()
 for f in range(64):
-    kernel = w1[:,:,:,f]                      # shape (5,5,3)
-    write_neuron_mem(f"conv1_n{f}.mem", b1[f], kernel)
+    write_neuron_mem(f"conv1_n{f}.mem", b1[f], w1[:,:,:,f])
 
-# ── Conv2: [3,3,64,64] ──
-w2, b2 = model.layers[1].get_weights()       # w2: (3,3,64,64)
+w2, b2 = model.layers[1].get_weights()
 for f in range(64):
-    kernel = w2[:,:,:,f]                      # shape (3,3,64)
-    write_neuron_mem(f"conv2_n{f}.mem", b2[f], kernel)
+    write_neuron_mem(f"conv2_n{f}.mem", b2[f], w2[:,:,:,f])
 
-# ── Dense: (4096, 10) ──
-wd, bd = model.layers[3].get_weights()        # after Flatten (layer 2)
+wd, bd = model.layers[3].get_weights()
 for c in range(10):
     write_neuron_mem(f"dense_n{c}.mem", bd[c], wd[:, c])
 
 print("\nAll weight files exported.")
-print(f"Conv1: 64 files × {1+75} entries")
-print(f"Conv2: 64 files × {1+576} entries")
-print(f"Dense: 10 files × {1+4096} entries")
