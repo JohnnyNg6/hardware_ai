@@ -4,11 +4,6 @@
 //   UART protocol:
 //     Host sends ASCII seed (≤40 chars) terminated by '\n'.
 //     FPGA replies with 11 predicted characters.
-//
-//   Resource estimate (XC7K325T):
-//     DSPs : 128 + 128 + 63 = 319  (of 840)
-//     LUTs : ~70 K                  (of 203 800)
-//     FFs  : ~60 K                  (of 407 600)
 // ============================================================
 `timescale 1ns/1ps
 module lstm_top #(
@@ -145,17 +140,19 @@ module lstm_top #(
 
     reg [3:0] mstate;
     reg [5:0] seq_idx;         // index into seed / generation
+    reg       dense_first;     // FIX: flag for first dense-feed cycle
 
     assign led = {4'b0, mstate};
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            mstate     <= M_IDLE;
-            seed_len   <= 0; seq_idx <= 0; out_cnt <= 0; out_tx_idx <= 0;
-            l1_start   <= 0; l2_start <= 0; l1_clear <= 0; l2_clear <= 0;
-            dense_start<= 0; dense_valid <= 0; dense_addr <= 0;
-            tx_start   <= 0; tx_data <= 0;
+            mstate      <= M_IDLE;
+            seed_len    <= 0; seq_idx <= 0; out_cnt <= 0; out_tx_idx <= 0;
+            l1_start    <= 0; l2_start <= 0; l1_clear <= 0; l2_clear <= 0;
+            dense_start <= 0; dense_valid <= 0; dense_addr <= 0;
+            tx_start    <= 0; tx_data <= 0;
             cur_char_idx <= 0;
+            dense_first <= 0;
         end else begin
             // pulse defaults
             l1_start  <= 0; l2_start  <= 0;
@@ -164,10 +161,16 @@ module lstm_top #(
 
             case (mstate)
             // ── wait for seed input ──
+            // FIX: store the very first character here, because
+            //      rx_valid is a one-cycle pulse and will be gone
+            //      by the time M_RECV runs.
             M_IDLE: begin
                 seed_len <= 0;
-                if (rx_valid && rx_data != 8'h0A)
-                    mstate <= M_RECV;
+                if (rx_valid && rx_data != 8'h0A) begin
+                    seed_buf[0]  <= c2i_rom[rx_data[6:0]][5:0];
+                    seed_len     <= 1;   // overrides the <= 0 above
+                    mstate       <= M_RECV;
+                end
             end
 
             // ── receive seed characters until newline ──
@@ -194,7 +197,7 @@ module lstm_top #(
                 if (seq_idx < seed_len) begin
                     cur_char_idx <= seed_buf[seq_idx];
                     l1_start     <= 1;
-                    mstate       <= M_SEED_L2;       // wait for L1 done
+                    mstate       <= M_SEED_L2;
                 end else begin
                     mstate <= M_GEN_DENSE;
                 end
@@ -204,7 +207,7 @@ module lstm_top #(
             M_SEED_L2: begin
                 if (l1_done) begin
                     l2_start <= 1;
-                    mstate   <= M_SEED_L2;           // reuse state, wait l2
+                    mstate   <= M_SEED_L2;   // stay, now wait for l2
                 end
                 if (l2_done) begin
                     seq_idx <= seq_idx + 1;
@@ -217,6 +220,7 @@ module lstm_top #(
                 if (out_cnt < NUM_GEN) begin
                     dense_start <= 1;
                     dense_addr  <= 0;
+                    dense_first <= 1;        // FIX
                     mstate      <= M_GEN_DRUN;
                 end else begin
                     out_tx_idx <= 0;
@@ -225,11 +229,17 @@ module lstm_top #(
             end
 
             // ── generation: run dense (stream h2 elements) ──
+            // FIX: On the first cycle, set dense_valid but do NOT
+            //      increment dense_addr, so the neuron sees
+            //      din_valid=1 together with din=h2[0].
             M_GEN_DRUN: begin
                 dense_valid <= 1;
                 if (dense_done) begin
                     dense_valid <= 0;
                     mstate      <= M_GEN_SAVE;
+                end else if (dense_first) begin
+                    dense_first <= 0;
+                    // addr stays at 0
                 end else begin
                     dense_addr <= dense_addr + 1;
                 end
@@ -265,7 +275,6 @@ module lstm_top #(
                     tx_start <= 1;
                     mstate   <= M_TX_WAIT;
                 end else if (out_tx_idx >= out_cnt) begin
-                    // send newline
                     if (!tx_busy) begin
                         tx_data  <= 8'h0A;
                         tx_start <= 1;
