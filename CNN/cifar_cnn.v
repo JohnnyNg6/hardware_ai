@@ -55,7 +55,6 @@ conv_layer #(
 
 /* ================================================================
    Conv2  14×14×64 → 7×7×64   kernel 3×3  stride 2  same
-   pad_top=0, pad_left=0 (TF convention: extra goes bottom/right)
    ================================================================ */
 wire [15:0] c2_ia;
 reg  signed [15:0] c2_id;
@@ -88,10 +87,11 @@ reg         d_start;
 always @(posedge clk) d_id <= c2_buf[d_ia[11:0]];
 
 dense_layer #(
-    .NI(3136),.NO(10),
-    .WFILE("dense_w.mem"),.BFILE("dense_b.mem")
+    .NI(3136),
+    .NO(10)
 ) u_d (
-    .clk(clk),.rst_n(rst_n),.start(d_start),.done(d_done),
+    .clk(clk),.rst_n(rst_n),
+    .start(d_start),.done(d_done),
     .in_addr(d_ia),.in_data(d_id),
     .digit(digit_out),.result_valid(result_valid)
 );
