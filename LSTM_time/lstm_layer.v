@@ -71,14 +71,16 @@ module lstm_layer #(
     reg [3:0] lstate;
     reg [1:0] cur_gate;
     reg [2:0] wait_cnt;
+    reg       mac_first;           // FIX: flag for first MAC cycle
 
     integer ii;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            lstate   <= L_IDLE; cur_gate <= 0; addr <= 0;
+            lstate    <= L_IDLE; cur_gate <= 0; addr <= 0;
             lb <= 0; me <= 0; sg <= 0; du <= 0; gid <= 0;
             step_done <= 0; wait_cnt <= 0;
+            mac_first <= 0;
         end else begin
             // defaults
             lb <= 0; me <= 0; sg <= 0; du <= 0; step_done <= 0;
@@ -97,20 +99,31 @@ module lstm_layer #(
 
             // ── load bias for current gate ──
             L_BIAS: begin
-                gid    <= cur_gate;
-                lb     <= 1;
-                addr   <= 0;
-                lstate <= L_MAC;
+                gid       <= cur_gate;
+                lb        <= 1;
+                addr      <= 0;
+                mac_first <= 1;          // FIX
+                lstate    <= L_MAC;
             end
 
             // ── stream concat elements ──
+            // FIX: On the first L_MAC cycle after L_BIAS, me is set
+            //      but addr is NOT incremented, so that the unit sees
+            //      mac_en=1 together with addr=0 on the next clock.
+            //      On the final element (addr==CS-1) we suppress me
+            //      so no extra MAC leaks into L_STORE.
             L_MAC: begin
                 gid <= cur_gate;
                 me  <= 1;
-                if (addr == CS[CW-1:0] - 1)
+                if (mac_first) begin
+                    mac_first <= 0;
+                    // addr stays at 0 — do NOT increment
+                end else if (addr == CS[CW-1:0] - 1) begin
+                    me     <= 0;         // FIX: override — no more MAC
                     lstate <= L_STORE;
-                else
+                end else begin
                     addr <= addr + 1;
+                end
             end
 
             // ── store gate activation ──
