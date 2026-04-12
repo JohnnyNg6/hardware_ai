@@ -13,8 +13,8 @@ module dense_layer #(
     output reg         result_valid
 );
 
-    localparam [2:0] S_IDLE=0, S_START=1, S_ADDR=2,
-                     S_PIPE=3, S_FEED=4, S_WAIT=5, S_DONE=6;
+    localparam [2:0] S_IDLE=0, S_START=1, S_ADDR=2, S_FEED=3,
+                     S_WAIT=4, S_DONE=5;
     reg [2:0] st;
     localparam CW = $clog2(NI > 1 ? NI : 2);
     reg [CW-1:0] cnt;
@@ -46,7 +46,7 @@ module dense_layer #(
             if (n_dout[k] > max_val) begin max_val=n_dout[k]; max_idx=k[3:0]; end
     end
 
-    // ---- Address generation FSM ----
+    // ---- FSM (2-cycle-per-element loop) ----
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st<=S_IDLE; cnt<=0; in_addr<=0;
@@ -56,17 +56,25 @@ module dense_layer #(
             n_start<=0; n_din_valid<=0; result_valid<=0; done<=0;
             case (st)
             S_IDLE: if (start) st<=S_START;
-            S_START: begin n_start<=1; in_addr<=0; cnt<=0; st<=S_ADDR; end
-            S_ADDR: st<=S_PIPE;    // BRAM read latency
-            S_PIPE: begin
-                n_din<=in_data; n_din_valid<=1;
-                if (cnt==NI[CW-1:0]-1) st<=S_WAIT;
-                else begin cnt<=cnt+1; in_addr<=in_addr+1; st<=S_FEED; end
+            S_START: begin
+                n_start<=1;
+                in_addr<=0;
+                cnt<=0;
+                st<=S_ADDR;
+            end
+            S_ADDR: begin
+                st<=S_FEED;            // 1-cycle BRAM latency wait
             end
             S_FEED: begin
-                n_din<=in_data; n_din_valid<=1;
-                if (cnt==NI[CW-1:0]-1) st<=S_WAIT;
-                else begin cnt<=cnt+1; in_addr<=in_addr+1; end
+                n_din       <= in_data;
+                n_din_valid <= 1'b1;
+                if (cnt == NI[CW-1:0]-1)
+                    st <= S_WAIT;
+                else begin
+                    cnt     <= cnt + 1;
+                    in_addr <= in_addr + 1;
+                    st      <= S_ADDR;  // back to wait state
+                end
             end
             S_WAIT: if (n_done[0]) begin
                 digit<=max_idx; result_valid<=1; st<=S_DONE;
