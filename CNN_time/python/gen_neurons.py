@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Generate conv1_block.v and conv2_block.v with 64 parallel neurons each."""
+"""Generate conv1_block.v, conv2_block.v, and dense_block.v with parallel neurons."""
+
+import os
+
+# ── Point this to your .mem folder ──────────────────────────────
+MEM_DIR = os.path.expanduser("~/Downloads/mem")
+# Vivado needs forward slashes, even on Windows
+MEM_DIR = MEM_DIR.replace("\\", "/")
+# ────────────────────────────────────────────────────────────────
 
 TEMPLATE_TOP = """\
 `timescale 1ns / 1ps
@@ -30,10 +38,10 @@ module {mod_name} (
 """
 
 TEMPLATE_NEURON = (
-    "    neuron #(.NUM_INPUTS(KSZ),.WEIGHT_FILE(\"{prefix}{i}.mem\"))\n"
+    "    neuron #(.NUM_INPUTS(KSZ),.WEIGHT_FILE(\"{mem_path}\"))\n"
     "        u{i} (.clk(clk),.rst_n(rst_n),.start(n_start),\n"
     "             .din(n_din),.din_valid(n_din_valid),\n"
-    "             .dout(n_dout[{i}]),.done(n_done[{i}]),.relu_en(1'b1));\n"
+    "             .dout(n_dout[{i}]),.done(n_done[{i}]),.relu_en({relu}));\n"
 )
 
 TEMPLATE_BOT = """\
@@ -64,23 +72,57 @@ endmodule
 """
 
 def gen(filename, mod, prefix, nf, ksz,
-        ih, iw, ic, fh, fw, st, pt, pl, oh, ow):
+        ih, iw, ic, fh, fw, st, pt, pl, oh, ow, relu="1'b1"):
+    # Verify .mem files exist before generating
+    missing = []
+    for i in range(nf):
+        mem_file = os.path.join(MEM_DIR, f"{prefix}{i}.mem")
+        if not os.path.isfile(mem_file):
+            missing.append(f"{prefix}{i}.mem")
+
+    if missing:
+        print(f"  WARNING: {len(missing)} .mem files not found in {MEM_DIR}:")
+        for m in missing[:5]:
+            print(f"    - {m}")
+        if len(missing) > 5:
+            print(f"    ... and {len(missing)-5} more")
+        print(f"  Generating anyway with absolute paths.\n")
+
     with open(filename, 'w') as f:
         f.write(TEMPLATE_TOP.format(mod_name=mod, ksz=ksz, nf=nf))
         for i in range(nf):
-            f.write(TEMPLATE_NEURON.format(prefix=prefix, i=i))
+            abs_path = MEM_DIR + "/" + f"{prefix}{i}.mem"
+            f.write(TEMPLATE_NEURON.format(mem_path=abs_path, i=i, relu=relu))
         f.write(TEMPLATE_BOT.format(
             ih=ih, iw=iw, ic=ic, fh=fh, fw=fw, nf=nf,
             st=st, pt=pt, pl=pl, oh=oh, ow=ow))
     print(f"  wrote {filename}  ({nf} neurons, KSZ={ksz})")
+    print(f"    .mem path: {MEM_DIR}/{prefix}*.mem")
 
 if __name__ == '__main__':
+    print(f"MEM_DIR = {MEM_DIR}\n")
+
+    # Verify the directory exists
+    if not os.path.isdir(MEM_DIR):
+        print(f"ERROR: Directory {MEM_DIR} does not exist!")
+        print(f"  Please create it and place your 138 .mem files there.")
+        exit(1)
+
+    # Count .mem files present
+    mem_files = [f for f in os.listdir(MEM_DIR) if f.endswith('.mem')]
+    print(f"Found {len(mem_files)} .mem files in {MEM_DIR}\n")
+
     gen("conv1_block.v", "conv1_block", "conv1_n",
         nf=64, ksz=75,
         ih=32, iw=32, ic=3, fh=5, fw=5,
-        st=2, pt=1, pl=1, oh=16, ow=16)
+        st=2, pt=1, pl=1, oh=16, ow=16,
+        relu="1'b1")
 
     gen("conv2_block.v", "conv2_block", "conv2_n",
         nf=64, ksz=576,
         ih=16, iw=16, ic=64, fh=3, fw=3,
-        st=2, pt=0, pl=0, oh=8, ow=8)
+        st=2, pt=0, pl=0, oh=8, ow=8,
+        relu="1'b1")
+
+    print("\nDone. Replace the old .v files in your Vivado project and re-synthesize.")
+    print("After synthesis, check: BRAM should be >> 12 (expect ~70-120).")
