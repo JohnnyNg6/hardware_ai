@@ -1,6 +1,3 @@
-// ============================================================
-// lstm_top.v — Kintex-7 LSTM text-generation engine
-// ============================================================
 `timescale 1ns/1ps
 module lstm_top #(
     parameter integer ENC_WIDTH   = 63,
@@ -112,11 +109,18 @@ module lstm_top #(
         .done       (dense_done)
     );
 
-    // ── argmax ──
+    // ── argmax (now sequential / registered) ──
     wire [$clog2(ENC_WIDTH)-1:0] pred_idx;
+    wire                         argmax_done;
+    reg                          argmax_start;
+
     argmax #(.N(ENC_WIDTH)) u_am (
-        .vals_flat(dense_scores_flat),
-        .idx      (pred_idx)
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .vals_flat (dense_scores_flat),
+        .start     (argmax_start),
+        .idx       (pred_idx),
+        .done      (argmax_done)
     );
 
     // ── output buffer ──
@@ -130,17 +134,15 @@ module lstm_top #(
         M_CLEAR     = 4'd2,
         M_SEED_L1   = 4'd3,
         M_SEED_W1   = 4'd4,
-        M_SEED_L2   = 4'd5,
-        M_SEED_W2   = 4'd6,
-        M_GEN_DENSE = 4'd7,
-        M_GEN_DWAIT = 4'd8,
+        M_SEED_W2   = 4'd5,
+        M_GEN_DENSE = 4'd6,
+        M_GEN_DWAIT = 4'd7,
+        M_GEN_AWAIT = 4'd8,   // ← NEW: wait for argmax
         M_GEN_SAVE  = 4'd9,
-        M_GEN_L1    = 4'd10,
-        M_GEN_W1    = 4'd11,
-        M_GEN_L2    = 4'd12,
-        M_GEN_W2    = 4'd13,
-        M_TX        = 4'd14,
-        M_TX_WAIT   = 4'd15;
+        M_GEN_W1    = 4'd10,
+        M_GEN_W2    = 4'd11,
+        M_TX        = 4'd12,
+        M_TX_WAIT   = 4'd13;
 
     reg [3:0] mstate;
     reg [5:0] seq_idx;
@@ -159,16 +161,18 @@ module lstm_top #(
             l1_clear     <= 1'b0;
             l2_clear     <= 1'b0;
             dense_start  <= 1'b0;
+            argmax_start <= 1'b0;
             tx_start     <= 1'b0;
             tx_data      <= 8'd0;
             cur_char_idx <= 6'd0;
         end else begin
-            l1_start    <= 1'b0;
-            l2_start    <= 1'b0;
-            l1_clear    <= 1'b0;
-            l2_clear    <= 1'b0;
-            dense_start <= 1'b0;
-            tx_start    <= 1'b0;
+            l1_start     <= 1'b0;
+            l2_start     <= 1'b0;
+            l1_clear     <= 1'b0;
+            l2_clear     <= 1'b0;
+            dense_start  <= 1'b0;
+            argmax_start <= 1'b0;
+            tx_start     <= 1'b0;
 
             case (mstate)
 
@@ -235,7 +239,14 @@ module lstm_top #(
             end
 
             M_GEN_DWAIT: begin
-                if (dense_done)
+                if (dense_done) begin
+                    argmax_start <= 1'b1;      // ← start argmax scan
+                    mstate       <= M_GEN_AWAIT;
+                end
+            end
+
+            M_GEN_AWAIT: begin                 // ← NEW STATE
+                if (argmax_done)
                     mstate <= M_GEN_SAVE;
             end
 
