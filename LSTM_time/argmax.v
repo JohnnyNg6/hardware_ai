@@ -1,5 +1,6 @@
 // ============================================================
 // argmax.v — Find index of maximum among N signed Q8.8 values
+//   Pipeline latency: 0 (purely combinational)
 // ============================================================
 `timescale 1ns/1ps
 module argmax #(
