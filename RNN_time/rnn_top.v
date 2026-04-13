@@ -143,7 +143,7 @@ wire [6:0]         rnn_h_idx = feed_cnt[6:0] - 7'd1;
 wire signed [15:0] h_rd_rnn  = $signed(hidden_flat[rnn_h_idx * 16 +: 16]);
 
 // ============================ Main FSM ===================================
-always @(posedge clk or negedge rst_n) begin
+always @(posedge clk) begin
     if (!rst_n) begin
         state           <= S_IDLE;
         seq_len         <= 16'd0;
