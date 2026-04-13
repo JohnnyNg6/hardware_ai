@@ -1,17 +1,32 @@
 // ============================================================
-// lstm_unit.v — One LSTM hidden-state node
+// lstm_unit.v — One LSTM hidden-state unit
 //
-//   Computes 4 gates (f,i,g,o) SEQUENTIALLY through a single
-//   shared multiplier so that only 1 DSP48 is consumed.
-//   All units in a layer receive the SAME broadcast concat
-//   stream and operate IN PARALLEL.
+// Wraps a single neuron instance (1 DSP48) that processes
+// all 4 gates (f,i,g,o) SEQUENTIALLY.  The weight BRAM holds
+// all 4 gates' weights concatenated.
 //
-//   Weight ROM layout (one file per unit):
-//     Gate f : [bias, w0 … wN-1]   (N = CONCAT_SIZE words)
-//     Gate i : [bias, w0 … wN-1]
-//     Gate g : [bias, w0 … wN-1]   (candidate cell)
-//     Gate o : [bias, w0 … wN-1]
-//   Total = 4 * (CONCAT_SIZE + 1) words, Q8.8 hex
+// Gate order in BRAM (matches export_weights.py):
+//   offset 0*GW … 1*GW-1 : gate f (forget)
+//   offset 1*GW … 2*GW-1 : gate i (input)
+//   offset 2*GW … 3*GW-1 : gate g (candidate)
+//   offset 3*GW … 4*GW-1 : gate o (output)
+// where GW = CONCAT_SIZE + 1
+//
+// Interface — driven by the layer controller:
+//   neuron_start : 1-clk pulse, begins MAC for current gate_id
+//   gate_id      : which gate (0–3), stable during computation
+//   din/din_valid: concat element stream (broadcast from controller)
+//   store_gate   : 1-clk pulse after neuron finishes, latches activated result
+//   do_update    : 1-clk pulse, starts 3-cycle cell/h update
+//   clear_state  : reset c and h to zero
+//
+// Timing:
+//   neuron_start → neuron processes → done → store_gate
+//   (layer controller manages the exact cycle counts)
+//
+// Pipeline latency (store_gate to gate register update): 0
+//   store_gate is a direct registered write using combinational
+//   sigmoid/tanh of the held neuron_out.
 // ============================================================
 `timescale 1ns/1ps
 module lstm_unit #(
@@ -21,125 +36,137 @@ module lstm_unit #(
     input  wire               clk,
     input  wire               rst_n,
     // ── layer-driven control ──
-    input  wire               clear_state,        // reset c & h to 0
-    input  wire               load_bias,          // 1 clk: load bias for current gate
-    input  wire               mac_en,             // 1 = accumulate this cycle
-    input  wire               store_gate,         // 1 clk: apply activation & store
-    input  wire [1:0]         gate_id,            // which gate: 0=f 1=i 2=g 3=o
-    input  wire               do_update,          // begin 3-cycle cell/h update
-    // ── data ──
-    input  wire signed [15:0] concat_din,         // broadcast element
-    input  wire [$clog2(CONCAT_SIZE>1?CONCAT_SIZE:2)-1:0] w_offset,
-    // ── output ──
-    output wire signed [15:0] h_out
+    input  wire               clear_state,
+    input  wire               neuron_start,
+    input  wire [1:0]         gate_id,
+    input  wire signed [15:0] din,
+    input  wire               din_valid,
+    input  wire               store_gate,
+    input  wire               do_update,
+    // ── outputs ──
+    output wire signed [15:0] h_out,
+    output wire               neuron_done
 );
-    // ── parameters ──
+    // ── derived parameters ──
     localparam GW = CONCAT_SIZE + 1;              // words per gate
-    localparam TW = 4 * GW;
+    localparam TW = 4 * GW;                       // total BRAM depth
+    localparam AW = $clog2(TW > 1 ? TW : 2);
 
-    // ── weight ROM ──
-    (* ram_style = "distributed" *)
-    reg signed [15:0] w [0:TW-1];
-    initial $readmemh(WEIGHT_FILE, w);
+    // ── base address for current gate ──
+    //    gate_id is 2 bits, GW is a synthesis-time constant.
+    wire [AW-1:0] base_addr;
+    assign base_addr = (gate_id == 2'd0) ? {AW{1'b0}} :
+                       (gate_id == 2'd1) ? GW[AW-1:0] :
+                       (gate_id == 2'd2) ? (2 * GW[AW-1:0]) :
+                                           (3 * GW[AW-1:0]);
 
-    // ── state registers ──
-    reg signed [15:0] c_reg, h_reg;
+    // ── neuron instance (1 DSP48) ──
+    wire signed [15:0] neuron_out;
+
+    neuron #(
+        .NUM_INPUTS  (CONCAT_SIZE),
+        .MEM_DEPTH   (TW),
+        .WEIGHT_FILE (WEIGHT_FILE)
+    ) u_neuron (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .start     (neuron_start),
+        .base_addr (base_addr),
+        .din       (din),
+        .din_valid (din_valid),
+        .dout      (neuron_out),
+        .done      (neuron_done)
+    );
+
+    // ── activation look-ups (combinational, distributed ROM) ──
+    wire signed [15:0] sig_out;
+    sigmoid u_sig (.x(neuron_out), .y(sig_out));
+
+    // Shared tanh: gate-g activation when !upd_active,
+    //              tanh(c_new) during cell update.
+    reg                upd_active;
+    reg  signed [15:0] c_reg, h_reg;
+    wire signed [15:0] tanh_in  = upd_active ? c_reg : neuron_out;
+    wire signed [15:0] tanh_out;
+    tanh_act u_tnh (.x(tanh_in), .y(tanh_out));
+
     assign h_out = h_reg;
 
     // ── gate result registers ──
-    reg signed [15:0] gf, gi, gg, go_r;
+    reg signed [15:0] gf, gi_r, gg, go_r;
 
-    // ── accumulator ──
-    reg signed [47:0] acc;
-
-    // ── activation look-ups (combinational) ──
-    wire signed [15:0] z_raw = acc[23:8];
-    wire               z_ovf = (acc[47:24] != {24{acc[23]}});
-    wire signed [15:0] z_sat = z_ovf ? (acc[47] ? 16'sh8000 : 16'sh7FFF)
-                                     : z_raw;
-    wire signed [15:0] sig_z, tnh_z;
-    sigmoid  u_sig (.x(z_sat), .y(sig_z));
-    tanh_act u_tnh (.x(z_sat), .y(tnh_z));
-
-    // ── weight address ──
-    wire [$clog2(TW)-1:0] wa = gate_id * GW[15:0] + {1'b0, w_offset} + 1;
-    wire [$clog2(TW)-1:0] ba = gate_id * GW[15:0];
-
-    // ── MAC product (uses 1 DSP48) ──
-    wire signed [31:0] mac_prod = concat_din * w[wa];
-
-    // ── cell-update shared multiplier ──
-    //    We sequence 3 multiplies in 3 clocks using the update FSM.
-    reg [1:0] upd_cnt;                            // 0,1,2
-    reg signed [15:0] upd_tmp;                    // temp f*c result
-
-    wire signed [15:0] upd_a = (upd_cnt == 2'd0) ? gf  :
-                               (upd_cnt == 2'd1) ? gi  : go_r;
-    wire signed [15:0] tanh_c;
-    tanh_act u_tnh_c (.x(c_reg), .y(tanh_c));
-
-    wire signed [15:0] upd_b = (upd_cnt == 2'd0) ? c_reg :
-                               (upd_cnt == 2'd1) ? gg    : tanh_c;
+    // ── cell-update multiplier (may infer DSP48 when neuron's is idle) ──
+    reg  signed [15:0] upd_a, upd_b;
     wire signed [31:0] upd_p = upd_a * upd_b;
+    wire               upd_ovf = (upd_p[31:24] != {8{upd_p[23]}});
+    wire signed [15:0] upd_q88 = upd_ovf ? (upd_p[31] ? 16'sh8000
+                                                       : 16'sh7FFF)
+                                         : upd_p[23:8];
 
-    // Q16.16 → Q8.8 with saturation
-    wire signed [15:0] upd_q88;
-    wire upd_ovf = (upd_p[31:24] != {8{upd_p[23]}});
-    assign upd_q88 = upd_ovf ? (upd_p[31] ? 16'sh8000 : 16'sh7FFF)
-                             : upd_p[23:8];
-
-    // ── update FSM ──
-    reg upd_active;
+    // ── cell-update FSM ──
+    reg [1:0]         upd_cnt;
+    reg signed [15:0] upd_tmp;   // holds f*c_old
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            c_reg <= 0; h_reg <= 0; acc <= 0;
-            gf <= 0; gi <= 0; gg <= 0; go_r <= 0;
-            upd_cnt <= 0; upd_tmp <= 0; upd_active <= 0;
+            c_reg      <= 16'd0;
+            h_reg      <= 16'd0;
+            gf         <= 16'd0;
+            gi_r       <= 16'd0;
+            gg         <= 16'd0;
+            go_r       <= 16'd0;
+            upd_active <= 1'b0;
+            upd_cnt    <= 2'd0;
+            upd_tmp    <= 16'd0;
+            upd_a      <= 16'd0;
+            upd_b      <= 16'd0;
         end else begin
             // ── clear ──
             if (clear_state) begin
-                c_reg <= 0; h_reg <= 0;
+                c_reg <= 16'd0;
+                h_reg <= 16'd0;
             end
 
-            // ── bias load ──
-            if (load_bias)
-                acc <= {{24{w[ba][15]}}, w[ba], 8'b0};
-
-            // ── MAC ──
-            if (mac_en)
-                acc <= acc + {{16{mac_prod[31]}}, mac_prod};
-
-            // ── store gate result ──
+            // ── store activated gate result ──
             if (store_gate) begin
                 case (gate_id)
-                    2'd0: gf   <= sig_z;          // f: sigmoid
-                    2'd1: gi   <= sig_z;          // i: sigmoid
-                    2'd2: gg   <= tnh_z;          // g: tanh
-                    2'd3: go_r <= sig_z;          // o: sigmoid
+                    2'd0: gf   <= sig_out;       // f: sigmoid
+                    2'd1: gi_r <= sig_out;        // i: sigmoid
+                    2'd2: gg   <= tanh_out;       // g: tanh
+                    2'd3: go_r <= sig_out;        // o: sigmoid
                 endcase
             end
 
             // ── cell / hidden update (3 cycles) ──
             if (do_update && !upd_active) begin
-                upd_active <= 1;
-                upd_cnt    <= 0;
+                upd_active <= 1'b1;
+                upd_cnt    <= 2'd0;
+                upd_a      <= gf;
+                upd_b      <= c_reg;
             end
 
             if (upd_active) begin
                 case (upd_cnt)
-                    2'd0: begin                       // f * c_old
-                        upd_tmp  <= upd_q88;
-                        upd_cnt  <= 2'd1;
+                    2'd0: begin
+                        // Cycle 0: compute f * c_old
+                        upd_tmp <= upd_q88;
+                        upd_cnt <= 2'd1;
+                        upd_a   <= gi_r;
+                        upd_b   <= gg;
                     end
-                    2'd1: begin                       // i * g  then c_new
-                        c_reg    <= upd_tmp + upd_q88;
-                        upd_cnt  <= 2'd2;
+                    2'd1: begin
+                        // Cycle 1: compute i * g, then c_new = f*c + i*g
+                        c_reg   <= upd_tmp + upd_q88;
+                        upd_cnt <= 2'd2;
+                        upd_a   <= go_r;
+                        upd_b   <= tanh_out; // tanh(c_new) via shared tanh
                     end
-                    2'd2: begin                       // o * tanh(c_new)
+                    2'd2: begin
+                        // Cycle 2: compute o * tanh(c_new), h_new
                         h_reg      <= upd_q88;
-                        upd_active <= 0;
+                        upd_active <= 1'b0;
                     end
+                    default: upd_active <= 1'b0;
                 endcase
             end
         end
