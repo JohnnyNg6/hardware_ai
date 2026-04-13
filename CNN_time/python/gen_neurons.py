@@ -46,13 +46,20 @@ TEMPLATE_NEURON = (
 
 TEMPLATE_BOT = """\
 
-    // -------- Output MUX (combinational) --------
+    // -------- Delayed wr_idx (aligns MUX data with registered out_addr) --------
     wire [7:0] wr_idx;
+    reg  [7:0] wr_idx_d;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) wr_idx_d <= 8'd0;
+        else        wr_idx_d <= wr_idx;
+    end
+
+    // -------- Output MUX (combinational, uses DELAYED wr_idx) --------
     integer m;
     always @(*) begin
         out_data = n_dout[0];
         for (m = 1; m < NF; m = m + 1)
-            if (wr_idx == m[7:0]) out_data = n_dout[m];
+            if (wr_idx_d == m[7:0]) out_data = n_dout[m];
     end
 
     // -------- Shared controller --------
