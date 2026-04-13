@@ -1,13 +1,5 @@
 // ============================================================
 // lstm_top.v — Kintex-7 LSTM text-generation engine
-//
-// UART protocol:
-//   Host sends ASCII seed (≤40 chars) terminated by '\n'.
-//   FPGA replies with 11 predicted characters + '\n'.
-//
-// Clock: 50 MHz (G22).  All LSTM/Dense run at this frequency.
-// Estimated per-generation-step: ~2000 clocks ≈ 40 µs.
-// Full inference (40 seed + 11 gen): ~100K clocks ≈ 2 ms.
 // ============================================================
 `timescale 1ns/1ps
 module lstm_top #(
@@ -22,7 +14,6 @@ module lstm_top #(
     output wire       uart_txd,
     output wire [7:0] led
 );
-    // ── clock / reset ──
     wire clk   = clk_50m;
     wire rst_n = rst_key_n;
 
@@ -54,18 +45,20 @@ module lstm_top #(
     reg [5:0] seed_buf [0:MAX_SEED-1];
     reg [5:0] seed_len;
 
-    // ── one-hot encoder ──
-    reg  [5:0]         cur_char_idx;
-    reg  signed [15:0] x_vec [0:ENC_WIDTH-1];
+    // ── one-hot encoder (flat) ──
+    reg [5:0] cur_char_idx;
 
-    integer jj;
-    always @(*) begin
-        for (jj = 0; jj < ENC_WIDTH; jj = jj + 1)
-            x_vec[jj] = (jj[5:0] == cur_char_idx) ? 16'sh0100 : 16'sh0000;
-    end
+    wire [ENC_WIDTH*16-1:0] x_vec_flat;
+    genvar gx;
+    generate
+        for (gx = 0; gx < ENC_WIDTH; gx = gx + 1) begin : gen_xvec
+            assign x_vec_flat[gx*16 +: 16] =
+                (gx[5:0] == cur_char_idx) ? 16'sh0100 : 16'sh0000;
+        end
+    endgenerate
 
     // ── LSTM layer 1 ──
-    wire signed [15:0] h1 [0:HIDDEN_SIZE-1];
+    wire [HIDDEN_SIZE*16-1:0] h1_flat;
     reg  l1_start, l1_clear;
     wire l1_done;
 
@@ -74,16 +67,17 @@ module lstm_top #(
         .HIDDEN_SIZE(HIDDEN_SIZE),
         .LAYER_ID   (1)
     ) u_l1 (
-        .clk(clk), .rst_n(rst_n),
+        .clk        (clk),
+        .rst_n      (rst_n),
         .clear_state(l1_clear),
-        .start_step(l1_start),
-        .x_in(x_vec),
-        .h_out(h1),
-        .step_done(l1_done)
+        .start_step (l1_start),
+        .x_in_flat  (x_vec_flat),
+        .h_out_flat (h1_flat),
+        .step_done  (l1_done)
     );
 
     // ── LSTM layer 2 ──
-    wire signed [15:0] h2 [0:HIDDEN_SIZE-1];
+    wire [HIDDEN_SIZE*16-1:0] h2_flat;
     reg  l2_start, l2_clear;
     wire l2_done;
 
@@ -92,16 +86,17 @@ module lstm_top #(
         .HIDDEN_SIZE(HIDDEN_SIZE),
         .LAYER_ID   (2)
     ) u_l2 (
-        .clk(clk), .rst_n(rst_n),
+        .clk        (clk),
+        .rst_n      (rst_n),
         .clear_state(l2_clear),
-        .start_step(l2_start),
-        .x_in(h1),
-        .h_out(h2),
-        .step_done(l2_done)
+        .start_step (l2_start),
+        .x_in_flat  (h1_flat),
+        .h_out_flat (h2_flat),
+        .step_done  (l2_done)
     );
 
     // ── Dense layer ──
-    wire signed [15:0] dense_scores [0:ENC_WIDTH-1];
+    wire [ENC_WIDTH*16-1:0] dense_scores_flat;
     reg  dense_start;
     wire dense_done;
 
@@ -109,16 +104,20 @@ module lstm_top #(
         .INPUT_SIZE (HIDDEN_SIZE),
         .OUTPUT_SIZE(ENC_WIDTH)
     ) u_dense (
-        .clk(clk), .rst_n(rst_n),
-        .start(dense_start),
-        .x_in(h2),
-        .scores(dense_scores),
-        .done(dense_done)
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .start      (dense_start),
+        .x_in_flat  (h2_flat),
+        .scores_flat(dense_scores_flat),
+        .done       (dense_done)
     );
 
     // ── argmax ──
     wire [$clog2(ENC_WIDTH)-1:0] pred_idx;
-    argmax #(.N(ENC_WIDTH)) u_am (.vals(dense_scores), .idx(pred_idx));
+    argmax #(.N(ENC_WIDTH)) u_am (
+        .vals_flat(dense_scores_flat),
+        .idx      (pred_idx)
+    );
 
     // ── output buffer ──
     reg [7:0] out_buf [0:NUM_GEN-1];
@@ -150,21 +149,20 @@ module lstm_top #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            mstate      <= M_IDLE;
-            seed_len    <= 6'd0;
-            seq_idx     <= 6'd0;
-            out_cnt     <= 4'd0;
-            out_tx_idx  <= 4'd0;
-            l1_start    <= 1'b0;
-            l2_start    <= 1'b0;
-            l1_clear    <= 1'b0;
-            l2_clear    <= 1'b0;
-            dense_start <= 1'b0;
-            tx_start    <= 1'b0;
-            tx_data     <= 8'd0;
+            mstate       <= M_IDLE;
+            seed_len     <= 6'd0;
+            seq_idx      <= 6'd0;
+            out_cnt      <= 4'd0;
+            out_tx_idx   <= 4'd0;
+            l1_start     <= 1'b0;
+            l2_start     <= 1'b0;
+            l1_clear     <= 1'b0;
+            l2_clear     <= 1'b0;
+            dense_start  <= 1'b0;
+            tx_start     <= 1'b0;
+            tx_data      <= 8'd0;
             cur_char_idx <= 6'd0;
         end else begin
-            // ── default pulses ──
             l1_start    <= 1'b0;
             l2_start    <= 1'b0;
             l1_clear    <= 1'b0;
@@ -174,7 +172,6 @@ module lstm_top #(
 
             case (mstate)
 
-            // ── wait for first seed character ──
             M_IDLE: begin
                 seed_len <= 6'd0;
                 if (rx_valid && rx_data != 8'h0A) begin
@@ -184,7 +181,6 @@ module lstm_top #(
                 end
             end
 
-            // ── receive remaining seed characters ──
             M_RECV: begin
                 if (rx_valid) begin
                     if (rx_data == 8'h0A || seed_len == MAX_SEED[5:0])
@@ -196,7 +192,6 @@ module lstm_top #(
                 end
             end
 
-            // ── clear LSTM states ──
             M_CLEAR: begin
                 l1_clear <= 1'b1;
                 l2_clear <= 1'b1;
@@ -205,7 +200,6 @@ module lstm_top #(
                 mstate   <= M_SEED_L1;
             end
 
-            // ── seed: start layer 1 ──
             M_SEED_L1: begin
                 if (seq_idx < seed_len) begin
                     cur_char_idx <= seed_buf[seq_idx];
@@ -216,7 +210,6 @@ module lstm_top #(
                 end
             end
 
-            // ── seed: wait for layer 1 ──
             M_SEED_W1: begin
                 if (l1_done) begin
                     l2_start <= 1'b1;
@@ -224,7 +217,6 @@ module lstm_top #(
                 end
             end
 
-            // ── seed: wait for layer 2 ──
             M_SEED_W2: begin
                 if (l2_done) begin
                     seq_idx <= seq_idx + 6'd1;
@@ -232,7 +224,6 @@ module lstm_top #(
                 end
             end
 
-            // ── generation: start dense ──
             M_GEN_DENSE: begin
                 if (out_cnt < NUM_GEN[3:0]) begin
                     dense_start <= 1'b1;
@@ -243,13 +234,11 @@ module lstm_top #(
                 end
             end
 
-            // ── generation: wait for dense ──
             M_GEN_DWAIT: begin
                 if (dense_done)
                     mstate <= M_GEN_SAVE;
             end
 
-            // ── generation: save predicted char, start L1 ──
             M_GEN_SAVE: begin
                 out_buf[out_cnt] <= i2c_rom[pred_idx][7:0];
                 cur_char_idx     <= pred_idx[$clog2(ENC_WIDTH)-1:0];
@@ -258,7 +247,6 @@ module lstm_top #(
                 mstate           <= M_GEN_W1;
             end
 
-            // ── generation: wait for L1 ──
             M_GEN_W1: begin
                 if (l1_done) begin
                     l2_start <= 1'b1;
@@ -266,13 +254,11 @@ module lstm_top #(
                 end
             end
 
-            // ── generation: wait for L2 ──
             M_GEN_W2: begin
                 if (l2_done)
                     mstate <= M_GEN_DENSE;
             end
 
-            // ── transmit results ──
             M_TX: begin
                 if (out_tx_idx < out_cnt && !tx_busy) begin
                     tx_data  <= out_buf[out_tx_idx];
