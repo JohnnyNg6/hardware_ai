@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Send a normalised Q8.8 sequence to the FPGA via UART and
-   read back the Q8.8 prediction, then de-normalise."""
+"""Send a normalised Q8.8 sequence to the FPGA via UART,
+   read back the Q8.8 prediction, de-normalise, and print."""
 
 import serial, struct, sys, time, numpy as np
 
-PORT  = "/dev/ttyUSB0"   # adjust for your OS
-BAUD  = 115200
-NORM  = "mem/norm.txt"
-CSV   = "book_store_sales.csv"
-MIN   = 12
-SPLIT = 0.8
+PORT       = "/dev/ttyUSB0"      # adjust for your OS / board
+BAUD       = 115200
+NORM       = "mem/norm.txt"
+CSV        = "book_store_sales.csv"
+MIN        = 12
+SPLIT      = 0.8
 START_BYTE = 0xAA
 
-# ---------- helpers ----------
+# ---- helpers ----
 def float_to_q88_bytes(v):
     i = int(round(v * 256.0))
     i = max(-32768, min(32767, i))
@@ -25,57 +25,60 @@ def q88_bytes_to_float(hi, lo):
         u -= 0x10000
     return u / 256.0
 
-# ---------- load norm ----------
+# ---- load normalisation constants ----
 with open(NORM) as f:
     mean   = float(f.readline())
     stddev = float(f.readline())
 
-# ---------- load data ----------
+# ---- load data ----
 with open(CSV, 'r', encoding='utf-8') as f:
     next(f)
-    sales = np.array([float(line.split(',')[1]) for line in f], dtype=np.float32)
+    sales = np.array([float(line.split(',')[1]) for line in f],
+                     dtype=np.float32)
 
-months = len(sales)
-split  = int(months * SPLIT)
+months     = len(sales)
+split      = int(months * SPLIT)
 test_sales = sales[split:]
 test_std   = (test_sales - mean) / stddev
-
 test_months = len(test_sales)
 
-# pick one test sample (last one, longest)
-idx = test_months - MIN - 1
-seq = np.zeros(test_months - 1, dtype=np.float32)
+# ---- pick one test sample (last complete window) ----
+idx      = test_months - MIN - 1
+seq      = np.zeros(test_months - 1, dtype=np.float32)
 seq[-(idx + MIN):] = test_std[:idx + MIN]
 expected = test_sales[idx + MIN]
+seq_len  = len(seq)
 
-seq_len = len(seq)
-print(f"Sending sequence of length {seq_len}  (expect ~{expected:.0f})")
+print(f"Sequence length : {seq_len}")
+print(f"Expected output : {expected:.0f}")
 
-# ---------- UART ----------
-ser = serial.Serial(PORT, BAUD, timeout=5)
+# ---- UART ----
+ser = serial.Serial(PORT, BAUD, timeout=10)
 time.sleep(0.1)
 ser.reset_input_buffer()
 
-# send header
+# header
 ser.write(bytes([START_BYTE]))
 ser.write(bytes([seq_len >> 8, seq_len & 0xFF]))
 
-# send sequence
+# data (Q8.8, big-endian)
 for v in seq:
     ser.write(float_to_q88_bytes(v))
-
 ser.flush()
-print("Data sent, waiting for result …")
+
+print("Sent.  Waiting for FPGA response …")
 
 # receive 2 bytes
 resp = ser.read(2)
 if len(resp) < 2:
-    print("ERROR: timeout")
+    print("ERROR: timeout — no response from FPGA")
     sys.exit(1)
 
-raw = q88_bytes_to_float(resp[0], resp[1])
+raw        = q88_bytes_to_float(resp[0], resp[1])
 prediction = raw * stddev + mean
-print(f"FPGA raw Q8.8 = {raw:.4f}")
-print(f"Prediction     = {prediction:.1f}")
-print(f"Actual         = {expected:.1f}")
+
+print(f"FPGA Q8.8 raw   : {raw:.4f}")
+print(f"Prediction       : {prediction:.1f}")
+print(f"Actual           : {expected:.1f}")
+print(f"Abs error        : {abs(prediction - expected):.1f}")
 ser.close()
