@@ -1,48 +1,30 @@
 // ============================================================
 // dense_layer.v — OUTPUT_SIZE parallel neurons, linear output
-//
-// Contains an internal streaming controller that feeds x_in
-// elements to all neurons at the correct pipeline phase.
-//
-// Interface:
-//   start  : 1-clk pulse — begins computation
-//   x_in   : all INPUT_SIZE values must be stable at start
-//   scores : available when done=1
-//   done   : 1-clk pulse, INPUT_SIZE + 4 clocks after start
-//
-// Timing:
-//   Cycle 0: start → neurons enter S_BIAS_WAIT
-//   Cycle 1: internal wait (neurons loading bias)
-//   Cycle 2: first din output (neurons in S_BIAS_LOAD, register din)
-//   Cycle 3: first MAC in neurons
-//   ...
-//   Cycle N+2: last MAC
-//   Cycle N+3: done
+//   Ports flattened for Verilog-2001 compatibility
 // ============================================================
 `timescale 1ns/1ps
 module dense_layer #(
     parameter integer INPUT_SIZE  = 128,
     parameter integer OUTPUT_SIZE = 63
 )(
-    input  wire               clk,
-    input  wire               rst_n,
-    input  wire               start,
-    input  wire signed [15:0] x_in   [0:INPUT_SIZE-1],
-    output wire signed [15:0] scores [0:OUTPUT_SIZE-1],
-    output wire               done
+    input  wire                          clk,
+    input  wire                          rst_n,
+    input  wire                          start,
+    input  wire [INPUT_SIZE*16-1:0]      x_in_flat,
+    output wire [OUTPUT_SIZE*16-1:0]     scores_flat,
+    output wire                          done
 );
-    // ── internal streaming controller ──
     localparam AW = $clog2(INPUT_SIZE > 1 ? INPUT_SIZE : 2);
 
     localparam [1:0] D_IDLE = 2'd0,
-                     D_WAIT = 2'd1,   // 1 cycle for neuron bias BRAM
+                     D_WAIT = 2'd1,
                      D_FEED = 2'd2,
-                     D_TAIL = 2'd3;   // wait for done
+                     D_TAIL = 2'd3;
 
-    reg [1:0]     dstate;
-    reg [AW-1:0]  addr;
-    reg           dv;
-    reg signed [15:0] dd;
+    reg [1:0]         dstate;
+    reg [AW-1:0]      addr;
+    reg                dv;
+    reg signed [15:0]  dd;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -51,7 +33,7 @@ module dense_layer #(
             dv     <= 1'b0;
             dd     <= 16'd0;
         end else begin
-            dv <= 1'b0;      // default
+            dv <= 1'b0;
             case (dstate)
                 D_IDLE: begin
                     if (start) begin
@@ -61,7 +43,7 @@ module dense_layer #(
                 end
                 D_FEED: begin
                     dv <= 1'b1;
-                    dd <= x_in[addr];
+                    dd <= $signed(x_in_flat[addr*16 +: 16]);
                     if (addr == INPUT_SIZE[AW-1:0] - {{(AW-1){1'b0}}, 1'b1})
                         dstate <= D_TAIL;
                     else
@@ -93,7 +75,7 @@ module dense_layer #(
                 .base_addr ({BA_W{1'b0}}),
                 .din       (dd),
                 .din_valid (dv),
-                .dout      (scores[gi]),
+                .dout      (scores_flat[gi*16 +: 16]),
                 .done      (done_vec[gi])
             );
         end
