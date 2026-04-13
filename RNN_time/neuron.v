@@ -45,7 +45,7 @@ module neuron #(
     // Weight Block RAM — synchronous read, 1-cycle latency
     // Depth = NUM_INPUTS + 1  (indices 0 … NUM_INPUTS)
     // ================================================================
-    (* ram_style = "block" *)
+    (* ram_style = "block", rom_style = "block" *)
     reg signed [15:0] w [0:NUM_INPUTS];
     initial $readmemh(WEIGHT_FILE, w);
 
@@ -64,7 +64,7 @@ module neuron #(
     reg signed [15:0] din_p1, din_p2;
     reg               vld_p1, vld_p2;
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             din_p1 <= 16'sd0;   din_p2 <= 16'sd0;
             vld_p1 <= 1'b0;     vld_p2 <= 1'b0;
@@ -101,7 +101,7 @@ module neuron #(
     localparam CW = $clog2(NUM_INPUTS > 0 ? NUM_INPUTS + 1 : 2);
     reg [CW-1:0] cnt;
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             state  <= S_IDLE;
             acc    <= 48'sd0;
