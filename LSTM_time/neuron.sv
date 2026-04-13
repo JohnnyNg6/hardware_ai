@@ -1,5 +1,5 @@
 // ============================================================
-// neuron.v — Pipelined MAC neuron with BRAM weights
+// neuron.sv - Pipelined MAC neuron with BRAM weights
 // ============================================================
 `timescale 1ns/1ps
 module neuron #(
@@ -24,13 +24,13 @@ module neuron #(
     localparam [AW-1:0] TWO_AW = 2;
 
     // ── weight BRAM ──
-    (* ram_style = "block" *)
+    (* rom_style = "block" *)
     reg signed [15:0] w [0:MEM_DEPTH-1];
     initial $readmemh(WEIGHT_FILE, w);
 
     reg  [AW-1:0]     rd_addr_reg;
     wire [AW-1:0]     rd_addr;
-    reg  signed [15:0] w_rd;
+    (* dont_touch = "true" *) reg  signed [15:0] w_rd;
     always @(posedge clk)
         w_rd <= w[rd_addr];
 
@@ -100,7 +100,7 @@ module neuron #(
 
                 // w_rd now holds bias (read was issued in S_IDLE)
                 S_BIAS_WAIT: begin
-                    acc   <= {{24{w_rd[15]}}, w_rd, 8'b0};   // ◄ FIXED: load bias HERE
+                    acc   <= {{24{w_rd[15]}}, w_rd, 8'b0};
                     state <= S_BIAS_LOAD;
                 end
 
